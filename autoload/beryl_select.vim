@@ -13,13 +13,12 @@ let s:modes = {}
 " API - generic
 " -------------------------------------------------------------------------------------
 
-function! beryl_select#configure(mode, descr, on_list, on_select, on_render, get_name)
+function! beryl_select#configure(mode, on_list, on_select, key)
 	let s:modes[a:mode] = {
-        \ 'descr': a:descr,
 		\ 'on_list': a:on_list,
 		\ 'on_select': a:on_select,
-        \ 'on_render': a:on_render,
-        \ 'get_name': a:get_name}
+        \ 'key': a:key
+	\ }
 endfunction
 
 function! beryl_select#open()
@@ -42,7 +41,6 @@ function! beryl_select#open(mode)
 	let w:dest = 1
 	silent below new
 	silent setlocal buftype=nofile bufhidden=wipe nobuflisted noswapfile nonu cursorline filetype=files
-    let b:beryl_select_descr = s:modes[a:mode].descr
 	let l:window = -1
 	windo if exists('w:dest') | let l:window = winnr() | endif
 	let l:mode = a:mode
@@ -53,18 +51,17 @@ function! beryl_select#open(mode)
 				\ 'mode': l:mode,
 				\ 'pos': l:pos,
 				\ 'on_select': s:modes[l:mode].on_select,
-                \ 'on_render': s:modes[l:mode].on_render,
-                \ 'get_name': s:modes[l:mode].get_name,
-				\ 'items': l:items, 
 				\ 'file_bufnr': l:bufnr, 
 				\ 'this_bufnr': bufnr('%'),
 				\ 'total_count': len(l:items),
 				\ 'filter': [], 'filter_str': '', 
-				\ 'filtered_count': len(l:items)}
+				\ 'filtered_count': len(l:items),
+                \ 'key': substitute(s:modes[l:mode].key, ' ', '', ''),
+				\ 'items': l:items}
 		setlocal modifiable noreadonly
 		silent execute '%d'
 		for l:item in l:items
-			call append(line('$'), {l:context.on_render}(l:item))
+			call s:append(l:item)
 		endfor
 		silent execute '1d'
 		silent setlocal readonly nomodifiable
@@ -75,8 +72,94 @@ function! beryl_select#open(mode)
 	endwhile
 
 	windo if exists('w:dest') | unlet w:dest | endif
-    
 	call beryl#qf_reopen()
+endfunction
+
+" -------------------------------------------------------------------------------------
+" API - selecting buffer
+" -------------------------------------------------------------------------------------
+
+function! beryl_select#list_buffers()
+	redir => l:result
+	silent execute "files"
+	redir END
+	let l:items = []
+	let l:index = 0
+	for s in split(l:result, "\n")
+		let l:item = {
+			\ 'name':	(split(strpart(s, 9), "\""))[0],
+			\ 'modified':	strpart(s, 7, 1) == '+',
+			\ 'bufnr':	str2nr(strpart(s, 0, 3))}
+		let l:items = l:items + [l:item]
+	endfor
+	return l:items
+endfunction
+
+function! beryl_select#open_buffer(item)
+	silent execute 'b ' . a:item.bufnr
+endfunction
+
+" -------------------------------------------------------------------------------------
+" API - selecting file
+" -------------------------------------------------------------------------------------
+
+function! beryl_select#list_files()
+	let l:filters = deepcopy(g:beryl_select_ignore)
+	if (!g:beryl_select_hidden_files)
+		let l:filters = l:filters + ['^\\.', '/\\.']
+	endif
+	let l:cmd = 'export LC_COLLATE="C"; find -L -type f | cut -c 3-' . join(map(l:filters, '" | grep -ve \"" . v:val . "\""')) . ' | sort'
+	let l:items = map(split(system(l:cmd), '\n'), "{'name': v:val, 'modified': 0}")
+	return l:items
+endfunction
+
+function! beryl_select#open_file(item) 
+	silent execute 'badd ' . a:item.name
+	silent execute 'b ' . a:item.name
+endfunction
+
+" -------------------------------------------------------------------------------------
+" API - selecting template
+" -------------------------------------------------------------------------------------
+
+function! beryl_select#list_templates()
+    let l:var = 'g:beryl_' . beryl#handler().name . '_templates'
+    if exists(l:var)
+        echom 'OK'
+        return eval(l:var)
+    else
+        return []
+    endif
+endfunction
+
+function! beryl_select#new_file_from_template(item)
+    let l:lang = beryl#handler().name
+    let l:snippet = values(values(snipMate#GetSnippets([l:lang], a:item.snippet))[0])[0]
+    let l:path = input('Filename: ')
+    execute 'e ' . l:path
+    execute 'set ft=' . l:lang
+    call snipMate#expandSnip(l:snippet[0], l:snippet[1], 1)
+	call cursor(1, 1)
+    redraw!
+endfunction
+
+" -------------------------------------------------------------------------------------
+" API - selecting colorscheme
+" -------------------------------------------------------------------------------------
+
+function! beryl_select#list_colorschemes()
+	let l:items = []
+	for l:path in split(globpath(&rtp, "colors/*.vim"), '\n')
+		let l:name = fnamemodify(l:path, ':t:r')
+		call add(l:items, {
+				\ 'name': l:name,
+				\ 'modified': exists('g:colors_name') && l:name == g:colors_name})
+	endfor
+	return l:items
+endfunction
+
+function! beryl_select#select_colorscheme(item)
+	silent execute 'colorscheme ' . a:item.name
 endfunction
 
 " -------------------------------------------------------------------------------------
@@ -94,7 +177,7 @@ function! s:loop(context)
 			call {a:context.on_select}(l:item)
 			redraw!
 			return ''
-		elseif l:char is# "\<ESC>"
+		elseif l:char is# "\<ESC>" || (type(l:code) == type(0) && eval('nr2char(' . l:code . ') is# "\' . a:context.key . '"'))
 			call s:close(a:context)
 			redraw!
 			return ''
@@ -144,7 +227,7 @@ function! s:close(context)
 endfunction
 
 function! s:find(context)
-	let l:name = {a:context.get_name}(getline('.'))
+	let l:name = strpart(getline('.'), 2)
 	for l:item in a:context.items
 		if l:name == l:item.name
 			return l:item
@@ -160,7 +243,7 @@ function! s:filter(context)
 	silent execute "%d"
 	for item in a:context.items
 		if (l:item.name =~ l:filter)
-			call append(line('$'), {a:context.on_render}(l:item))
+			call s:append(l:item)
 			let a:context.filtered_count += 1
 		endif
 	endfor
@@ -176,6 +259,10 @@ function! s:filter(context)
 	silent setlocal nomodifiable readonly	
 	silent execute "resize " . min([line("$"), g:beryl_select_max_size])
 	silent execute 'match Search /' . l:filter . '/'
+endfunction
+
+function! s:append(item)
+	call append(line('$'), (a:item.modified ? '+' : ' ') . ' ' . a:item.name)
 endfunction
 
 function! s:is_movement(c)

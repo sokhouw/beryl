@@ -8,15 +8,15 @@ endif
 let g:autoload_beryl = 1
 
 " language handler
-let s:handler =	{ 'name'	: '',
+let s:handler =	{ 
+        \ 'name'        	: '',
+        \ 'root'            : '',
 		\ 'init'			: 'beryl#no_op',
 		\ 'compile'			: 'beryl#no_op',
 		\ 'tags_update'		: 'beryl#no_op',
 		\ 'tags_jump'		: 'beryl#no_op',
-		\ 'find_usages'		: 'beryl#no_op'}
-
-let g:qf_lists = {}
-let g:cur_qf_list = ''
+		\ 'find_usages'		: 'beryl#no_op',
+        \ 'new_file'        : 'beryl#no_op'}
 
 " ---------------------------------------------------------------------------------------
 " autodetection
@@ -43,6 +43,7 @@ function! beryl#autodetect()
 			endtry
 			if l:autodetected
 				call s:init_handler(l:module)
+                let s:handler['root'] = l:path
 				return
 			endif
 		endfor
@@ -94,13 +95,36 @@ function! beryl#after_save()
 endfunction
 
 function! beryl#compile()
-    let key =  'compilation report - ' . expand('%')
-    let descr = key
-    call beryl#qf('compiling...',key, descr, s:handler.compile)
+	let buf = expand('%')
+	call s:set_status(l:buf, 'compiling...', 0, 0)
+    call beryl#qf_set_title(expand('%f') . ' - compile report')
+	cgetexpr {s:handler.compile}()
+	let [l:errors, l:warnings] = [0, 0]
+	for l:v in getqflist()
+		let l:errors += l:v.type == 'E'
+		let l:warnings += l:v.type == 'W'
+	endfor
+	if len(getqflist()) > 0
+		silent execute 'copen ' . min([len(getqflist()), s:qf_height()])
+    else
+		silent execute 'ccl'
+	endif
+	call s:set_status(l:buf, l:errors + l:warnings == 0 ? 'OK' : '', l:errors, l:warnings)
+	return l:errors == 0
 endfunction
 
 function! beryl#find_usages()
-    call beryl#qf('searching...', 'usages', 'usages', s:handler.find_usages)
+	let buf = expand('%')
+    let status = getbufvar(l:buf, 'beryl_status')
+	call s:set_status2(l:buf, 'searching...')
+	cgetexpr {s:handler.find_usages}()
+	if len(getqflist()) > 0
+		silent execute 'copen ' . min([len(getqflist()), s:qf_height()])
+    else
+        silent execute 'ccl'
+        echom 'Usages not found'
+	endif
+	call s:set_status2(l:buf, 'OK')
 endfunction
 
 function! s:set_status2(buf, s)
@@ -169,8 +193,56 @@ function beryl#qf_reopen()
 	endif
 endfunction
 
+function beryl#qf_toggle()
+	let l:qf = 0
+	windo if &l:buftype == 'quickfix' | let l:qf = 1 | endif
+	if l:qf == 1
+		ccl
+	else
+		silent execute 'copen ' . s:qf_height()
+	endif
+endfunction
+
+function! beryl#qf_set_title(title)
+    let g:beryl_quickfix_title = a:title
+endfunction
+
 function! s:qf_height()
 	return min([g:beryl_quickfix_max_height, max([1, len(getqflist())])])
+endfunction
+
+" ---------------------------------------------------------------------------------------
+" location window
+" ---------------------------------------------------------------------------------------
+
+function beryl#ll_toggle()
+	let l:ll = 0
+	windo if &l:buftype == 'location' | let l:ll = 1 | endif
+	if l:ll == 1
+		lcl
+	else
+        try
+    		silent execute 'lopen ' . s:ll_height()
+        catch 'E776:.*'
+            echom 'No location list'
+        endtry
+	endif
+endfunction
+
+function! s:ll_height()
+    return min([g:beryl_loclist_max_height, max([1, len(getloclist(0))])])
+endfunction
+
+" ---------------------------------------------------------------------------------------
+" location integrations
+" ---------------------------------------------------------------------------------------
+
+function! beryl#errors()
+	return s:describe_int('error', getbufvar(expand('%'), 'beryl_errors', 0))
+endfunction
+
+function! beryl#warnings()
+	return s:describe_int('warning', getbufvar(expand('%'), 'beryl_warnings', 0))
 endfunction
 
 function! beryl#status()
@@ -219,105 +291,14 @@ function! beryl#update_qf_matches()
 endfunction
 
 " ---------------------------------------------------------------------------------------
-" quickfix
+" lightline
 " ---------------------------------------------------------------------------------------
 
-function beryl#qftoggle()
-	let l:qf = 0
-	windo if &l:buftype == 'quickfix' | let l:qf = 1 | endif
-	if l:qf == 1
-		ccl
-	else
-        if len(g:qf_lists) == 1
-    		silent execute 'copen ' . s:qf_height()
-        elseif len(g:qf_lists) > 1
-            call beryl_select#open('quickfix')
-        endif
-	endif
-endfunction
-
-function! beryl#getqflists()
-    return g:qf_lists
-endfunction
-
-function! beryl#selectqflist(key)
-    if has_key(g:qf_lists, a:key)
-        let g:cur_qf_list = a:key
-        call setqflist(g:qf_lists[a:key].list)
-        silent execute 'copen ' . s:qf_height()
-    endif
-endfunction
-
-function! beryl#curqfdescr()
-    if has_key(g:qf_lists, g:cur_qf_list) 
-        return '[' . g:qf_lists[g:cur_qf_list].descr . ']'
+function! beryl#relativepath()
+    if &buftype == 'quickfix'
+        return exists('g:beryl_quickfix_title') ? '[' . g:beryl_quickfix_title . ']' : '[Quickfix List]'
     else
-        return '[Quickfix List]'
+        return expand('%f')
     endif
-endfunction
-
-function beryl#qf(status, key, descr, fun)
-	let buf = expand('%')
-	call s:set_status(l:buf, a:status, 0, 0)
-	cgetexpr {a:fun}()
-    call s:set_status(l:buf, 'OK', 0, 0)
-	if len(getqflist()) == 0
-        if has_key(g:qf_lists, a:key)
-            if g:cur_qf_list == a:key
-                let g:cur_qf_list = ''
-                ccl
-            endif
-            unlet g:qf_lists[a:key]
-        endif
-        redraw
-        return 1
-    else 
-        let g:qf_lists[a:key] = {'descr': a:descr, 'list': getqflist()}
-        let g:cur_qf_list = a:key
-        silent execute 'copen ' . s:qf_height()
-        redraw
-        return 0
-	endif
-endfunction
-
-function! beryl#getqflists()
-    let lists = {}
-    for [k, v] in items(g:qf_lists)
-        let l:lists[l:k] = l:v.descr
-    endfor
-    return l:lists
-endfunction
-
-" ---------------------------------------------------------------------------------------
-" integration points for lightline
-" ---------------------------------------------------------------------------------------
-
-function! beryl#title()
-    if &buftype == 'quickfix' 
-        return beryl#curqfdescr()
-    elseif &buftype == 'nofile'
-        return ''
-    else
-        return expand('%')
-    endif
-endfunction
-
-function! beryl#mode()
-    return exists('b:beryl_select_descr') ? b:beryl_select_descr : lightline#mode()
-endfunction
-
-function! beryl#readonly()
-	return &buftype != "quickfix" && &buftype != "nofile" && &readonly ? "\ue0a2" : ""
-endfunction
-
-function! beryl#modified()
-	if &buftype != "quickfix" && &buftype != "nofile"
-       if !&modifiable
-          return '-' 
-       elseif &modified
-           return '+'
-       endif
-    endif
-    return ''
 endfunction
 
